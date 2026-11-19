@@ -7,6 +7,7 @@ import arc.graphics.Pixmap;
 import arc.graphics.gl.GLVersion;
 import arc.graphics.GL20;
 import arc.graphics.GL30;
+import org.teavm.jso.JSBody;
 import org.teavm.jso.dom.html.HTMLCanvasElement;
 import org.teavm.jso.webgl.WebGLRenderingContext;
 
@@ -121,10 +122,18 @@ public class TeavmGraphics extends Graphics {
 
     @Override
     public float getDensity() {
-        // index.html scales the canvas backing store by devicePixelRatio, so
-        // UI scale corrections need the same factor here.
-        return (float) org.teavm.jso.browser.Window.current().getDevicePixelRatio();
+        // Keep UI scaling aligned with the capped canvas backing resolution.
+        return renderDpr();
     }
+
+    @JSBody(script =
+        "var d = window.__msRenderDpr;" +
+        "if(d) return d;" +
+        "var r = window.devicePixelRatio || 1;" +
+        "if((navigator.deviceMemory && navigator.deviceMemory <= 2) ||" +
+           "(navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 2)) return 1;" +
+        "return Math.min(r, 2);")
+    private static native float renderDpr();
 
     @Override
     public void setTitle(String title) {
