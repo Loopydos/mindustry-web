@@ -23,12 +23,13 @@ import org.teavm.jso.typedarrays.Uint8Array;
  * IndexedDB cache (see index.html -- no service worker) keyed by a hash of
  * the manifest text, so only the first visit pays the full download.
  *
- * At boot (before ApplicationListener.init, alongside IdbVfs.init) the
- * manifest is fetched and every non-music entry is fetched into an
- * in-memory map -- the game reads assets synchronously, and the browser has
- * no synchronous HTTP, so the only options are "already in memory" or
- * "async"; this makes the former true for everything the game loads
- * synchronously. Music stays out: it loads through Music.load ->
+ * At boot (before ApplicationListener.init, alongside IdbVfs.init) the folder
+ * build fetches every non-music entry into an in-memory map -- the game reads
+ * assets synchronously, and the browser has no synchronous HTTP, so the only
+ * options are "already in memory" or "async"; this makes the former true for
+ * everything the game loads synchronously. Standalone builds keep embedded
+ * base64 entries lazy and decode them on first synchronous read. Music stays
+ * out: it loads through Music.load ->
  * streamLoadFile -> TeavmFi.readBytesAsync, which fetches over HTTP and
  * decodes in the background.
  *
@@ -44,6 +45,7 @@ public final class WebAssets{
     private static final ObjectMap<String, byte[]> files = new ObjectMap<>();
 
     public static boolean loaded = false;
+    private static boolean embedded = false;
 
     private WebAssets(){}
 
@@ -54,30 +56,18 @@ public final class WebAssets{
         // unavailable anyway (file:// origins block it) -- populate straight
         // from the embedded base64 blob, no server involved.
         if(embeddedCount() > 0){
+            embedded = true;
             int count = embeddedCount();
             for(int i = 0; i < count; i++){
                 String path = embeddedKey(i);
                 if(!path.isEmpty()) manifest.add(path);
             }
             Log.info("[assets] embedded manifest: @ files", manifest.size);
-            for(String path : manifest){
-                ArrayBuffer buffer = embeddedBuffer(path);
-                if(buffer == null){
-                    Log.err("[assets] missing embedded entry '@'", path);
-                    continue;
-                }
-                try{
-                    int len = buffer.getByteLength();
-                    Uint8Array view = new Uint8Array(buffer);
-                    byte[] out = new byte[len];
-                    for(int i = 0; i < len; i++) out[i] = (byte)view.get(i);
-                    files.put(path, out);
-                }catch(Throwable t){
-                    Log.err("[assets] error decoding embedded '@'", path);
-                }
-            }
+            // Standalone assets remain base64 strings until first use. Decoding
+            // the entire asset tree here duplicates the file's already-large
+            // HTML in memory and delays the first frame on low-end devices.
             loaded = true;
-            Log.info("[assets] decoded @ embedded files into memory", files.size);
+            Log.info("[assets] ready with @ embedded files", manifest.size);
             done.run();
             return;
         }
@@ -133,10 +123,16 @@ public final class WebAssets{
             return;
         }
         int[] cursor = {0}, completed = {0};
-        for(int w = 0; w < Math.min(prefetchWorkers, total); w++){
+        for(int w = 0; w < Math.min(prefetchWorkerCount(), total); w++){
             prefetchNext(cursor, completed, total, done);
         }
     }
+
+    @JSBody(script =
+        "var low = (navigator.deviceMemory && navigator.deviceMemory <= 2) ||" +
+            "(navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 2);" +
+        "return low ? 8 : " + prefetchWorkers + ";")
+    private static native int prefetchWorkerCount();
 
     private static void prefetchNext(int[] cursor, int[] completed, int total, Runnable done){
         int index = cursor[0]++;
@@ -188,7 +184,24 @@ public final class WebAssets{
         if(data != null) return data;
 
         // Allow callers that hand us a leading slash (absolute-ish paths).
-        if(path.startsWith("/")) return files.get(path.substring(1));
+        if(path.startsWith("/")) path = path.substring(1);
+
+        if(embedded){
+            ArrayBuffer buffer = embeddedBuffer(path);
+            if(buffer != null){
+                try{
+                    int len = buffer.getByteLength();
+                    Uint8Array view = new Uint8Array(buffer);
+                    byte[] out = new byte[len];
+                    for(int i = 0; i < len; i++) out[i] = (byte)view.get(i);
+                    files.put(path, out);
+                    embeddedRelease(path);
+                    return out;
+                }catch(Throwable t){
+                    Log.err("[assets] error decoding embedded '@'", path);
+                }
+            }
+        }
 
         return null;
     }
@@ -199,7 +212,7 @@ public final class WebAssets{
         // file:// page fetch() is blocked outright, and even when it isn't,
         // the inline copy is the one that matches the inlined game code.
         String key = path.startsWith("/") ? path.substring(1) : path;
-        if(embeddedCount() > 0){
+        if(embedded){
             ArrayBuffer buffer = embeddedBuffer(key);
             if(buffer != null){
                 try{
@@ -207,6 +220,8 @@ public final class WebAssets{
                     Uint8Array view = new Uint8Array(buffer);
                     byte[] out = new byte[len];
                     for(int i = 0; i < len; i++) out[i] = (byte)view.get(i);
+                    files.put(key, out);
+                    embeddedRelease(key);
                     callback.call(out);
                 }catch(Throwable t){
                     Log.err("[assets] error decoding embedded '@'", path);
@@ -320,10 +335,19 @@ public final class WebAssets{
     // buildStandalone writes every asset, base64, into
     // globalThis.__MINDUSTRY_EMBEDDED__[path]; these helpers read it back.
 
-    @JSBody(script = "var e = globalThis.__MINDUSTRY_EMBEDDED__; return e ? Object.keys(e).length : 0;")
+    @JSBody(script =
+        "var e = globalThis.__MINDUSTRY_EMBEDDED__;" +
+        "if(!e) return 0;" +
+        "var k = globalThis.__MINDUSTRY_EMBEDDED_KEYS__;" +
+        "if(!k) k = globalThis.__MINDUSTRY_EMBEDDED_KEYS__ = Object.keys(e);" +
+        "return k.length;")
     static native int embeddedCount();
 
-    @JSBody(params = "i", script = "return Object.keys(globalThis.__MINDUSTRY_EMBEDDED__)[i];")
+    @JSBody(params = "i", script =
+        "var k = globalThis.__MINDUSTRY_EMBEDDED_KEYS__;" +
+        "if(!k){ var e = globalThis.__MINDUSTRY_EMBEDDED__;" +
+        "k = globalThis.__MINDUSTRY_EMBEDDED_KEYS__ = e ? Object.keys(e) : []; }" +
+        "return k[i] || '';")
     static native String embeddedKey(int i);
 
     /** Decodes the embedded base64 entry to a fresh ArrayBuffer; null when absent. */
@@ -336,4 +360,9 @@ public final class WebAssets{
         "for(var i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);" +
         "return buf;")
     static native ArrayBuffer embeddedBuffer(String key);
+
+    @JSBody(params = "key", script =
+        "var e = globalThis.__MINDUSTRY_EMBEDDED__;" +
+        "if(e) delete e[key];")
+    static native void embeddedRelease(String key);
 }

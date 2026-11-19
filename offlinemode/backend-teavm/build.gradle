@@ -347,9 +347,14 @@ canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 <script>
 function __msResize() {
     var c = document.getElementById('mindustry-canvas');
-    var dpr = window.devicePixelRatio || 1;
-    c.width = Math.floor(c.clientWidth * dpr);
-    c.height = Math.floor(c.clientHeight * dpr);
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if ((navigator.deviceMemory && navigator.deviceMemory <= 2)
+        || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 2)) dpr = 1;
+    window.__msRenderDpr = dpr;
+    var width = Math.floor(c.clientWidth * dpr);
+    var height = Math.floor(c.clientHeight * dpr);
+    if (c.width !== width) c.width = width;
+    if (c.height !== height) c.height = height;
 }
 window.addEventListener('resize', __msResize);
 __msResize();

@@ -216,7 +216,8 @@ the root-level `locales`, `basepartnames`, `contributors` — all read via
 `files.internal()` during boot. At boot, `WebAssets` fetches the manifest
 and prefetches every non-music entry into memory (the game reads assets
 synchronously; the browser has no sync HTTP). Music streams lazily via
-fetch.
+fetch. Standalone files keep embedded assets lazy and decode each entry only
+when first read.
 
 ## 5. Session log — milestone 3: wiring the whole game in
 
